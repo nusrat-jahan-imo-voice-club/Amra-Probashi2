@@ -6,8 +6,8 @@ import multer from "multer";
 import webpush from "web-push";
 import fs from "fs";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+const resolvedFilename = typeof __filename !== "undefined" ? __filename : (typeof import.meta !== "undefined" && import.meta.url ? fileURLToPath(import.meta.url) : "");
+const resolvedDirname = typeof __dirname !== "undefined" ? __dirname : (resolvedFilename ? path.dirname(resolvedFilename) : process.cwd());
 
 const upload = multer({ storage: multer.memoryStorage() });
 
